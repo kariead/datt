@@ -1,0 +1,466 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# | DATT - "Do All The Things" - Editing Workflow Assistant for AWS Editors
+# |
+# | Copyright 2021 Karie S. Adair <karie.s.adair@gmail.com/kariead@amazon.com>
+# |
+# | This software is free software. It is distributed under the Creative Commons
+# | "Attribution-ShareAlike 4.0 International" license. For license details and
+# | limitations, visit https://creativecommons.org/licenses/by-sa/4.0/legalcode
+# | 
+# | Usage: datt [-h|--help] [-v|--validate]
+# |
+# | Revision History:
+# | TBD
+# ------------------------------------------------------------------------------
+
+# *******************
+# **** Constants ****
+# *******************
+
+PROGNAME=${0##*/}
+VERSION="0.7"
+VERSIONSETS=("AWSDevDocsInteg/integ" "AWSDevDocsAlpha/alpha" "AWSDevDocs/public")
+WS_NAME="workspace"
+WORKSPACE_ROOT="/$WS_NAME/$USER"
+
+BORDER="************************************************************************"
+
+HELP_HEADER=("${PROGNAME} v. ${VERSION}" "Do All The Things - AWS Editorial Tool")
+OPTIONS_TEXT=("-v, --validate" "Validate the user on Amazon's servers." \
+			"-c, --create" "Create a new workspace for documents." \
+			"-b, --build" "Download and build a document package." \
+			"-g, --getbranch" "Switch to a named development branch for the downloaded package." \
+			"-m, --makebranch" "Create a new development branch for the downloaded package." \
+			"-r, --rebuild" "Rebuild a document package after editing." \
+			"-co, --commit" "Commit a rebuilt package back to the document version set." \
+			"-ws, --workspace" "Change the default workspace root directory from /workspace\n\t\t\t\tto a custom directory")
+MIDWAY_PROMPT=("First, enter your Amazon Midway password. This is the password you use" \
+				"to sign into the Amazon VPN. After entering your password, touch your" \
+				"YubiKey for 3 to 5 seconds to generate an OTP.")
+WIN_PROMPT=("Next, enter your Windows password. This is the password you use to sign" \
+			"onto your Windows account on your Amazon-provided laptop or desktop" \
+			"computer.")
+
+WS_PROMPT="You are about to create the workspace: "
+VS_PROMPT="In the AWS docs version set: "
+
+STD_PROMPT="Continue? [Y/N] > "
+
+VALID_SUCCESS="Successfully completed validation. You're good to go!"
+MIDWAY_BAD="Invalid Midway password or YubiKey OTP"
+KERBEROS_BAD="Invalid Windows/Kerberos password"
+HALT_MSG="Stoping the application"
+BAD_ARG="Not a valid arguement"
+BAD_VS_NAME="Invalid version set name"
+WS_FAIL="Could not create workspace directory $workspace"
+GETPKG_FAIL="Failed to retrieve package"
+SYNC_FAIL="Failed to sync package files"
+CLEANUP_FAIL="Failed to clean up package files"
+BUILD_FAIL="Build failed"
+PUSH_FAIL="Failed to upload branch to repository"
+CD_FAIL="Could not switch to directory"
+
+# *******************
+# **** Functions ****
+# *******************
+
+error_exit() {
+
+	printf "\n%s\n" "${PROGNAME}: ${1:-"Unknown Error"}" 1>&2
+	exit 1
+
+}
+
+help_me_out() {
+	
+	printf "%s\n\n" "$BORDER" "${HELP_HEADER[@]}" "$BORDER"
+
+	usage
+
+	printf "%s\n\n" "Options:"
+	printf "%-16s\t-\t%b\n" "${OPTIONS_TEXT[@]}"
+
+}
+
+usage() {
+
+	printf "%s\n" "Usage:"
+	printf "\t%s\n" \
+		"${PROGNAME} [ -h  | --help ]" \
+		"${PROGNAME} [ -v  | --validate ]" \
+		"${PROGNAME} [ -ws | --workspace ] [ Workspace Root ]" \
+		"${PROGNAME} [ -c  | --create ] [ Workspace ] [ Version Set ]" \
+		"${PROGNAME} [ -b  | --build ] [ Workspace ] [ Package ]" \
+		"${PROGNAME} [ -g  | --getbranch ] [ Workspace ] [ Package ] [ Branch ]" \
+		"${PROGNAME} [ -m  | --makebranch ] [ Workspace ] [ Package ] [ Branch ]" \
+		"${PROGNAME} [ -r  | --rebuild ] [ Workspace ] [ Package ]" \
+		"${PROGNAME} [ -c  | --commit ] [ Workspace ] [ Package ] [ Comment ]" \
+		" " 
+
+}
+
+validate_ID() {
+
+	# First, clear the console and keep things tidy.
+
+	clear
+
+	# Do Midway validation first
+
+	printf "%s\n" "$BORDER" "${MIDWAY_PROMPT[@]}" "$BORDER"
+
+	mwinit -o || error_exit "$MIDWAY_BAD"
+
+	# Then do Kerberos/Windows validation
+
+	clear
+
+	printf "%s\n" "$BORDER" "${WIN_PROMPT[@]}" "$BORDER"
+
+	kinit -f || error_exit "$KERBEROS_BAD"
+
+	# If both are successful, let the user know.
+
+	printf "\n%s\n" "$VALID_SUCCESS"
+
+}
+
+create_workspace() {
+
+	# Let's get to the root of things. Literally. The following command uses
+	# the WORKSPACE_ROOT constant and drops us in our workspace directory inside
+	# the Home directory.
+
+	# TODO: Write a procedure or... something?... to change the WORKSPACE_ROOT
+	# constant to wherever the user has their workspace directory, because
+	# different places for different folks, right?
+
+	cd $WORKSPACE_ROOT
+
+	# This is probably a round-about way of testing for the version set, but
+	# we'll go with it anyway for now. Look through the version sets built into
+	# the script as a constant, and compare the user input to them. If a match
+	# is found (the user's input is valid, in other words) then assign the match
+	# to the confirmedversionset variable.
+
+	for item in ${VERSIONSETS[@]}; do 
+		if [ "$item" = "$versionset" ]; then
+			confirmedversionset="$versionset"
+		fi
+	done
+
+	# If the supplied version set name was verified to be a valid one, then the
+	# "$confirmedversionset" value will be non-null. If it is null, a valid set
+	# name was not provided, and the program will exit with an error status.
+	# Again, there's probably a smarter way to do this check, but *shrugs*
+
+	if [ "$confirmedversionset" = "" ]; then
+		error_exit "$BAD_VS_NAME"
+	fi
+	
+	# Once we've validated the version set name, we prompt the user to confirm
+	# that they do want to create the workspace name given on the command line.
+
+	printf "%s\n" "$BORDER"
+	printf "%s%s\n" "$WS_PROMPT" "$workspace" "$VS_PROMPT" "$versionset"
+	printf "%s\n" "$BORDER"
+
+	# Prompt the user for a Yes/No response
+
+	read -p "$STD_PROMPT" response
+
+	# If the user answered 'Y', then run the brazil command to create the new
+	# workspace. If they answered 'N' or provided an invalid response, exit out
+	# of the program.
+
+	if [ "${response^^}" = "Y" ]; then
+		brazil ws create -n ${workspace} -vs ${versionset} || error_exit "$WS_FAIL"
+	else
+		echo "$HALT_MSG"
+	fi
+
+}
+
+build_package() {
+	
+	# Start by going to our workspace directory.
+
+	cd ${WORKSPACE_ROOT}/${workspace} || error_exit "$CD_FAIL"
+
+	# Then, get the package and clone a copy of it into our workspace. After
+	# that, update our cloned copy to ensure that includes all current changes
+	# by syncing with the cloud.
+
+	brazil ws use -p ${package} || error_exit "$GETPKG_FAIL"
+
+	brazil ws --sync || error_exit "$SYNC_FAIL"
+
+	# Finally, we navigate to the source directory for the package we downloaded
+	# and have Brazil build the package out so we can use it.
+
+	cd ${WORKSPACE_ROOT}/${workspace}/src/${package} || error_exit "$CD_FAIL"
+
+	brazil-build || error_exit "$BUILD_FAIL"
+
+	# Also, check git to make sure nothing weird happened
+
+	git status
+
+	printf "\n%s\n" "Package $package built successfully."
+	
+}
+
+get_branch() {
+
+	# First, go to the package directory
+
+	cd ${WORKSPACE_ROOT}/${workspace}/src/${package} || error_exit \
+		"Could not switch to folder for package $package"	
+
+	# Check out the writer's branch. If it doesn't exist, or typos
+	# are an issue, or something else goes wrong, it quits and tells you it
+	# couldn't find the branch.	
+
+	git checkout $branch || error_exit "Could not checkout branch $branch."
+
+	# Here we do a 'git status' to see if we switched to the right branch
+	# successfully. This is a stop gap so that, if the user entered the wrong
+	# branch, or did something else they didn't mean to, they can safely quit
+	# out of DATT.
+
+	git status
+
+	read -p "$RIGHT_BRANCH" response
+
+	# Take the (capitalized) response and see if the user answered yes. If they
+	# did, proceed with cleanup, sync, and building. Each step in that process
+	# can error out with an appropriate response to let you know at what stage
+	# of the process the program failed at.
+	# 
+	# Also, if the user answers no, or an invalid response, exit the program.	
+
+	if [ "${response^^}" = "Y" ]; then
+		
+		brazil ws --clean || error_exit "$CLEANUP_FAIL"
+		
+		brazil ws --sync || error_exit "$SYNC_FAIL"
+
+		brazil-build || error_exit "$BUILD_FAIL"
+
+	else
+
+		# Go back to mainline before we make a mess somewhere.		
+
+		git checkout mainline
+		
+		echo "$HALT_MSG"
+
+	fi
+
+}
+
+make_branch() {
+
+	# Similarly to the the get_branch function above, the step below in this
+	# function creates a new branch off the documentation package with a name
+	# defined by the user on the command line. If git fails for any reason,
+	# exit out and tell the user that an error occurred.	
+
+	git checkout -b ${branch} || error_exit "Failed to create branch $branch"
+
+	# Here we do a 'git status' to see if we switched to the new branch
+	# successfully. This is a stop gap so that, if the user entered the wrong
+	# branch, or did something else they didn't mean to, they can safely quit
+	# out of DATT.
+
+	git status
+
+	# Take the (capitalized) response and see if the user answered yes. If they
+	# did, push the new branch to the repository and build. Each step in that 
+	# process can error out with an appropriate response to let you know at what 
+	# stage of the process the program failed at.
+	# 
+	# Also, if the user answers no, or an invalid response, exit the program.	
+
+	read -p "$RIGHT_BRANCH" response	
+
+	if [ "${response^^}" = "Y" ]; then
+		
+		git push --set-upstream origin ${branch} || error_exit "$PUSH_FAIL"
+
+		brazil-build || error_exit "$BUILD_FAIL"
+
+	else
+		
+		# Don't leave an empty branch hanging out in the repository. Delete
+		# the branch so as not to cause confusion later.		
+
+		git -D ${branch}		
+
+		echo "$HALT_MSG"
+
+	fi
+
+}
+
+rebuild_package() {
+
+	# Wherever we went in the filesystem, let's go back to the package root.
+
+	cd ${WORKSPACE_ROOT}/${workspace}/src/${package}
+
+	# Run "git status" and make sure everything looks okay before building.
+
+	git status
+
+	read -p "$RIGHT_BRANCH" response
+
+	if [ "${response^^}" = "Y" ]; then
+		
+		git pull || error_exit \
+			"Failure while trying to update local copy from source."
+
+		brazil-build || error_exit "$BUILD_FAIL"
+
+	else
+		
+		# Don't leave an empty branch hanging out in the repository. Delete
+		# the branch so as not to cause confusion later.				
+
+		echo "$HALT_MSG"
+
+	fi
+
+}
+
+commit_package() {
+
+	# Wherever we went in the filesystem, let's go back to the package root.
+
+	cd ${WORKSPACE_ROOT}/${workspace}/src/${package}
+
+	# Give the user a chance to check their package for updates by running a 
+	# 'git pull' and seeing if anything needs to be downloaded. 
+
+	read -p "Do you want to check for package updates? (git pull) [Y/N] > " response
+	
+	if [ ${response^^} = "Y" ]; then
+
+		git pull
+
+	fi
+
+	# Next, we run 'git status' to check the state of our work, and give the
+	# user a chance to verify that they are in the correct branch and that only
+	# the files they've touched are ones that need to be updated.
+
+	# If the user chooses 'Y', then proceed with add, commit, and push, followed
+	# by printing the current status of the branch so that the user can see
+	# that everything has been updated.
+
+	git status
+	
+	read -p "Do the current branch AND package files look correct? [Y/N] > " response
+
+	if [ $response^^} = "Y"; then
+	
+		git add -A
+
+		git commit -m ${comment}
+
+		git push
+
+		git status
+
+	else
+
+		echo "$HALT_MSG"
+
+	fi
+
+}
+
+# *****************
+# *** PROCEDURE ***
+# *****************
+
+# Before we do anything else, make sure that we trap signals
+
+trap "clear; echo '${PROGNAME}: Program halted.'; exit 1" SIGHUP SIGINT SIGTERM
+
+# Now, let's interpret command line arguements and see what we were told to
+# do from the terminal. From here, we will branch into the appropriate function
+# to complete a sequence of commands, then come back to this loop so that we
+# can exit out of the application.
+#
+# TODO: Eventually there should be a standard cleanup/exit function that each
+# function routes to, so that the application goes through a standard, safe
+# exit every time it completes without an error.
+
+while [[ "$1" != "" ]]; do
+	case $1 in
+		-h | --help )   	help_me_out
+							exit
+							;;
+		-v | --validate )   validate_ID
+							exit
+							;;
+		-c | --create )		shift
+							workspace="$1"
+							shift
+							versionset="$1"
+							create_workspace
+							exit
+							;;
+		-b | --build )		shift
+							workspace="$1"
+							shift
+							package="$1"
+							build_package
+							exit
+							;;
+		-g | --getbranch )	shift
+							workspace="$1"
+							shift
+							package="$1"
+							shift
+							branch="$1"
+							get_branch
+							exit
+							;;
+		-m | --makebranch ) shift
+							workspace="$1"
+							shift
+							package="$1"
+							shift							
+							branch="$1"
+							make_branch
+							exit
+							;;
+		-r | --rebuild )	shift
+							workspace="$1"
+							shift
+							package="$1"
+							rebuild_package
+							exit
+							;;
+		-co | --commit )	shift
+							workspace="$1"
+							shift							
+							package="$1"
+							shift
+							comments="$1"
+							commit_package
+							exit
+							;;
+		-ws | --workspace ) shift
+							WS_NAME="$1"
+							shift
+							;;		
+		 * )				error_exit "$BAD_ARG"
+							;;
+	esac
+	shift
+done
